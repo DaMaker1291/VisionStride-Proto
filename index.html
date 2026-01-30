@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VisionStride Proto</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.js"></script>
+</head>
+<body class="bg-black text-white flex flex-col items-center justify-center h-screen">
+    <div id="status" class="text-green-500 mb-4 font-mono">System Ready...</div>
+    
+    <div class="relative w-64 h-64 border-2 border-zinc-800 rounded-full overflow-hidden mb-8">
+        <video id="webcam" autoplay playsinline class="object-cover w-full h-full grayscale opacity-50"></video>
+    </div>
+
+    <button id="startBtn" class="bg-red-600 hover:bg-red-500 w-48 h-48 rounded-full text-2xl font-bold shadow-[0_0_50px_rgba(220,38,38,0.5)] transition-all animate-pulse">
+        START RUN
+    </button>
+
+    <div id="output" class="mt-8 text-xl text-center px-4 italic opacity-80">
+        "Waiting for activation..."
+    </div>
+    
+    <script src="app.js"></script>
+</body>
+</html>
