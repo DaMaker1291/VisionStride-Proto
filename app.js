@@ -2,7 +2,10 @@ let model;
 let isRunning = false;
 let lastAlertTime = 0;
 let lastDirectionTime = 0;
+let lastGuidanceTime = 0;
 let navigationHistory = [];
+let lastSpokenMessage = '';
+let continuousGuidanceCount = 0;
 const video = document.getElementById('webcam');
 const startBtn = document.getElementById('startBtn');
 const statusDiv = document.getElementById('status');
@@ -96,6 +99,9 @@ function classifyObjectForNavigation(prediction) {
         'couch': { priority: 'medium', displayName: 'Couch', color: '#3b82f6', showLabel: false },
         'dining table': { priority: 'medium', displayName: 'Table', color: '#3b82f6', showLabel: false },
         'bench': { priority: 'medium', displayName: 'Bench', color: '#3b82f6', showLabel: false },
+        'wall': { priority: 'high', displayName: 'Wall', color: '#dc2626', showLabel: true },
+        'barrier': { priority: 'high', displayName: 'Barrier', color: '#dc2626', showLabel: true },
+        'potential_wall': { priority: 'medium', displayName: 'Wall', color: '#f59e0b', showLabel: false },
         
         // Potential obstacles
         'potted plant': { priority: 'low', displayName: 'Plant', color: '#10b981', showLabel: false },
@@ -142,8 +148,8 @@ function classifyObjectForNavigation(prediction) {
 function processNavigation(predictions) {
     const analysis = analyzeSpatialEnvironment(predictions);
     
-    if (analysis.isPathClear) {
-        updateUI("Clear path ahead. Continue straight.", "SAFE");
+    if (analysis.isPathClear && analysis.criticalObstacles.length === 0) {
+        updateUI("Path clear. Continue straight.", "SAFE");
         provideDirectionalGuidance("straight", analysis);
     } else {
         handleObstacles(analysis);
@@ -181,8 +187,12 @@ function analyzeSpatialEnvironment(predictions) {
         far: { distance: 0, objects: [] }
     };
     
+    // Add wall detection
+    const wallObjects = detectWallsAndBarriers(predictions);
+    const allObjects = [...predictions, ...wallObjects];
+    
     // Categorize objects by position and distance
-    predictions.forEach(pred => {
+    allObjects.forEach(pred => {
         const [x, y, w, h] = pred.bbox;
         const objCenterX = x + w/2;
         const objCenterY = y + h/2;
@@ -210,8 +220,61 @@ function analyzeSpatialEnvironment(predictions) {
         obstacles: zones.near.objects.concat(zones.medium.objects),
         criticalObstacles: zones.near.objects.filter(obj => obj.distance < 1.5),
         pathWidth: pathAnalysis.width,
-        confidence: calculateNavigationConfidence(zones)
+        confidence: calculateNavigationConfidence(zones),
+        hasWalls: wallObjects.length > 0
     };
+}
+
+function detectWallsAndBarriers(predictions) {
+    const walls = [];
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+    
+    // Detect large horizontal objects that might be walls or barriers
+    predictions.forEach(pred => {
+        const [x, y, w, h] = pred.bbox;
+        const aspectRatio = w / h;
+        const relativeWidth = w / width;
+        const relativeHeight = h / height;
+        
+        // Wall characteristics: very wide, not too tall, covering significant width
+        if (relativeWidth > 0.6 && aspectRatio > 2.0 && relativeHeight < 0.8) {
+            walls.push({
+                ...pred,
+                class: 'wall',
+                bbox: pred.bbox,
+                score: pred.score,
+                isWall: true
+            });
+        }
+        
+        // Detect potential barriers (large objects blocking path)
+        if (relativeWidth > 0.4 && relativeHeight > 0.3) {
+            const centerX = x + w/2;
+            if (centerX > width * 0.25 && centerX < width * 0.75) {
+                walls.push({
+                    ...pred,
+                    class: 'barrier',
+                    bbox: pred.bbox,
+                    score: pred.score,
+                    isBarrier: true
+                });
+            }
+        }
+    });
+    
+    // Add virtual wall detection for empty spaces (edge detection simulation)
+    if (predictions.length === 0) {
+        // If no objects detected, check if we might be facing a wall
+        walls.push({
+            class: 'potential_wall',
+            bbox: [width * 0.1, height * 0.1, width * 0.8, height * 0.8],
+            score: 0.3,
+            isPotentialWall: true
+        });
+    }
+    
+    return walls;
 }
 
 function estimateDistance(relativeWidth, relativeHeight) {
@@ -274,10 +337,15 @@ function handleObstacles(analysis) {
         const closest = critical[0];
         const direction = getDirection(closest);
         triggerFeedback(`STOP! ${closest.class} ${direction}`, "DANGER");
+        continuousGuidanceCount = 0; // Reset counter on danger
     } else if (analysis.obstacles.length > 0) {
         const guidance = getNavigationGuidance(analysis);
         updateUI(guidance.text, "CAUTION");
         provideDirectionalGuidance(guidance.direction, analysis);
+    } else if (analysis.hasWalls) {
+        updateUI("Wall detected. Find alternative route.", "CAUTION");
+        provideDirectionalGuidance("stop", analysis);
+        continuousGuidanceCount = 0; // Reset counter on wall detection
     }
 }
 
@@ -322,27 +390,46 @@ function getNavigationGuidance(analysis) {
 
 function provideDirectionalGuidance(direction, analysis) {
     const now = Date.now();
-    if (now - lastDirectionTime < 2000) return; // Throttle directions
     
     let message = '';
     let hapticPattern = [];
+    let shouldSpeak = false;
     
     switch(direction) {
         case 'left':
             message = 'Turn left';
             hapticPattern = [100, 50, 100];
+            shouldSpeak = true;
             break;
         case 'right':
             message = 'Turn right';
             hapticPattern = [50, 100, 50];
+            shouldSpeak = true;
             break;
         case 'straight':
-            message = 'Go straight';
-            hapticPattern = [200];
+            // Only say "go straight" if it's the first time or if direction changed
+            if (lastSpokenMessage !== 'Go straight' && now - lastDirectionTime > 5000) {
+                message = 'Go straight';
+                hapticPattern = [200];
+                shouldSpeak = true;
+                continuousGuidanceCount++;
+                
+                // After 3 continuous "go straight", stop speaking it
+                if (continuousGuidanceCount > 3) {
+                    shouldSpeak = false;
+                    message = '';
+                }
+            } else {
+                // Just provide haptic feedback
+                hapticPattern = [50];
+                shouldSpeak = false;
+            }
             break;
         case 'stop':
             message = 'Stop';
             hapticPattern = [200, 100, 200, 100, 200];
+            shouldSpeak = true;
+            continuousGuidanceCount = 0; // Reset counter on stop
             break;
     }
     
@@ -350,10 +437,11 @@ function provideDirectionalGuidance(direction, analysis) {
         navigator.vibrate(hapticPattern);
     }
     
-    if (message && now - lastDirectionTime > 3000) {
+    if (message && shouldSpeak && now - lastDirectionTime > 3000) {
         const speech = new SpeechSynthesisUtterance(message);
         speech.rate = 1.1;
         window.speechSynthesis.speak(speech);
+        lastSpokenMessage = message;
         lastDirectionTime = now;
     }
     
