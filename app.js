@@ -1,384 +1,437 @@
-let objectDetector;
-let camera;
+let model;
+let isRunning = false;
+let lastAlertTime = 0;
+let lastDirectionTime = 0;
+let navigationHistory = [];
 const video = document.getElementById('webcam');
 const startBtn = document.getElementById('startBtn');
 const statusDiv = document.getElementById('status');
-const fpsDiv = document.getElementById('fps');
-const guidancePanel = document.getElementById('guidancePanel');
+const overlay = document.getElementById('detectionOverlay');
 const guidanceText = document.getElementById('guidanceText');
-const urgencyLevel = document.getElementById('urgencyLevel');
-const objectCount = document.getElementById('objectCount');
-const detectionOverlay = document.getElementById('detectionOverlay');
-const audioIndicator = document.getElementById('audioIndicator');
-const synth = window.speechSynthesis;
+const directionIndicator = document.getElementById('directionIndicator');
+const pathClearance = document.getElementById('pathClearance');
 
-let isRunning = false;
-let lastFrameTime = performance.now();
-let frameCount = 0;
-let fps = 0;
-let detectionHistory = [];
-let lastAlertTime = 0;
+// Load the AI Model
+async function init() {
+    statusDiv.textContent = "Loading AI Model...";
+    model = await cocoSsd.load();
+    statusDiv.textContent = "System Ready";
+}
 
-// Navigation system
-const navigationSystem = {
-    safePath: { direction: 'center', confidence: 1.0 },
-    obstacles: [],
-    lastUpdate: 0,
+async function startCamera() {
+    const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: 640, height: 480 },
+        audio: false
+    });
+    video.srcObject = stream;
+    return new Promise((resolve) => video.onloadedmetadata = resolve);
+}
+
+async function detectionLoop() {
+    if (!isRunning) return;
+
+    const predictions = await model.detect(video);
+    renderDetections(predictions);
+    processNavigation(predictions);
     
-    analyzeObstacles(detections) {
-        this.obstacles = [];
-        let safeZones = ['left', 'center', 'right'];
+    requestAnimationFrame(detectionLoop);
+}
+
+function renderDetections(predictions) {
+    overlay.innerHTML = '';
+    predictions.forEach(p => {
+        const [x, y, width, height] = p.bbox;
+        const box = document.createElement('div');
+        box.className = 'detection-box';
+        // Scaling for display
+        const scaleX = overlay.offsetWidth / video.videoWidth;
+        const scaleY = overlay.offsetHeight / video.videoHeight;
         
-        detections.forEach(detection => {
-            const box = detection.boundingBox;
-            const centerX = box.originX + box.width / 2;
-            const videoWidth = video.videoWidth || 640;
-            
-            // Determine which zone the obstacle is in
-            let zone;
-            if (centerX < videoWidth * 0.33) zone = 'left';
-            else if (centerX > videoWidth * 0.67) zone = 'right';
-            else zone = 'center';
-            
-            // Calculate distance based on bounding box size
-            const distance = this.estimateDistance(box);
-            
-            this.obstacles.push({
-                zone,
-                distance,
-                object: detection.categories[0].categoryName,
-                confidence: detection.categories[0].score,
-                box
-            });
-            
-            // Remove safe zones with obstacles
-            if (distance < 3) {
-                safeZones = safeZones.filter(z => z !== zone);
-            }
-        });
+        box.style.left = `${x * scaleX}px`;
+        box.style.top = `${y * scaleY}px`;
+        box.style.width = `${width * scaleX}px`;
+        box.style.height = `${height * scaleY}px`;
         
-        // Determine best path
-        if (safeZones.includes('center')) {
-            this.safePath = { direction: 'center', confidence: 1.0 };
-        } else if (safeZones.includes('left')) {
-            this.safePath = { direction: 'left', confidence: 0.8 };
-        } else if (safeZones.includes('right')) {
-            this.safePath = { direction: 'right', confidence: 0.8 };
-        } else {
-            this.safePath = { direction: 'stop', confidence: 0.3 };
+        // Enhanced classification and color coding
+        const classification = classifyObjectForNavigation(p);
+        const proximity = width / video.videoWidth;
+        
+        box.style.borderColor = classification.color;
+        box.style.borderWidth = classification.isCritical ? '3px' : '2px';
+        
+        // Add label for important objects
+        if (classification.showLabel) {
+            const label = document.createElement('div');
+            label.className = 'absolute text-xs font-bold text-white bg-black/70 px-1 rounded';
+            label.style.top = '-20px';
+            label.style.left = '0';
+            label.textContent = classification.displayName;
+            box.appendChild(label);
         }
         
-        return this.getNavigationGuidance();
-    },
-    
-    estimateDistance(box) {
-        // Simple distance estimation based on object size
-        const videoWidth = video.videoWidth || 640;
-        const relativeSize = box.width / videoWidth;
-        
-        if (relativeSize > 0.4) return 0.5; // Very close
-        if (relativeSize > 0.25) return 1.0; // Close
-        if (relativeSize > 0.15) return 2.0; // Medium
-        if (relativeSize > 0.08) return 3.5; // Far
-        return 5.0; // Very far
-    },
-    
-    getNavigationGuidance() {
-        const closestObstacle = this.obstacles.reduce((closest, obs) => 
-            obs.distance < closest.distance ? obs : closest, 
-            { distance: Infinity }
-        );
-        
-        let guidance = {
-            text: "Path is clear. Proceed with confidence.",
-            urgency: "SAFE",
-            directions: { center: true, left: false, right: false },
-            audioAlert: false
-        };
-        
-        if (closestObstacle.distance < 1) {
-            guidance = {
-                text: `STOP! ${closestObstacle.object} directly ahead!`,
-                urgency: "DANGER",
-                directions: { center: false, left: false, right: false },
-                audioAlert: true
-            };
-        } else if (closestObstacle.distance < 2) {
-            const safeDir = this.safePath.direction;
-            guidance = {
-                text: `Caution: ${closestObstacle.object} nearby. Move ${safeDir}.`,
-                urgency: "CAUTION",
-                directions: { 
-                    center: safeDir === 'center', 
-                    left: safeDir === 'left', 
-                    right: safeDir === 'right' 
-                },
-                audioAlert: true
-            };
-        } else if (this.obstacles.length > 0) {
-            guidance = {
-                text: `${this.obstacles.length} objects detected. Path clear ahead.`,
-                urgency: "SAFE",
-                directions: { center: true, left: false, right: false },
-                audioAlert: false
-            };
-        }
-        
-        return guidance;
-    }
-};
-
-// 1. Load the AI Model (MediaPipe)
-async function setupAI() {
-    try {
-        statusDiv.textContent = "Loading AI model...";
-        const vision = await FilesetResolver.forVisionTasks(
-            "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
-        );
-        
-        objectDetector = await ObjectDetector.createFromOptions(vision, {
-            baseOptions: {
-                modelAssetPath: "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite",
-                delegate: "GPU"
-            },
-            scoreThreshold: 0.35,
-            maxResults: 10,
-            runningMode: "VIDEO"
-        });
-        
-        statusDiv.textContent = "AI model loaded";
-        statusDiv.className = "text-green-500 font-mono";
-        return true;
-    } catch (error) {
-        console.error("Error loading AI model:", error);
-        statusDiv.textContent = "AI model failed";
-        statusDiv.className = "text-red-500 font-mono";
-        return false;
-    }
+        overlay.appendChild(box);
+    });
 }
 
-// 2. Setup camera with MediaPipe Camera Utils
-async function setupCamera() {
-    try {
-        statusDiv.textContent = "Setting up camera...";
+function classifyObjectForNavigation(prediction) {
+    const className = prediction.class.toLowerCase();
+    const confidence = prediction.score;
+    const bbox = prediction.bbox;
+    const relativeSize = bbox[2] / video.videoWidth;
+    
+    // Navigation-relevant classifications
+    const navigationClasses = {
+        // Immediate dangers
+        'car': { priority: 'critical', displayName: 'Vehicle', color: '#dc2626', showLabel: true },
+        'truck': { priority: 'critical', displayName: 'Vehicle', color: '#dc2626', showLabel: true },
+        'bus': { priority: 'critical', displayName: 'Vehicle', color: '#dc2626', showLabel: true },
+        'motorcycle': { priority: 'critical', displayName: 'Vehicle', color: '#dc2626', showLabel: true },
+        'bicycle': { priority: 'high', displayName: 'Bike', color: '#ea580c', showLabel: true },
         
-        camera = new Camera(video, {
-            onFrame: async () => {
-                if (objectDetector && isRunning) {
-                    await detectObjects();
-                }
-            },
-            width: 640,
-            height: 480
-        });
+        // People and animals
+        'person': { priority: 'high', displayName: 'Person', color: '#f59e0b', showLabel: true },
         
-        await camera.start();
-        statusDiv.textContent = "Camera active";
-        statusDiv.className = "text-green-500 font-mono";
-        return true;
-    } catch (error) {
-        console.error("Error setting up camera:", error);
-        statusDiv.textContent = "Camera failed";
-        statusDiv.className = "text-red-500 font-mono";
-        return false;
-    }
-}
-
-// 3. Real-time object detection
-async function detectObjects() {
-    if (!objectDetector || !isRunning) return;
-    
-    const now = performance.now();
-    const detections = objectDetector.detectForVideo(video, now);
-    
-    // Update FPS
-    frameCount++;
-    if (now - lastFrameTime >= 1000) {
-        fps = frameCount;
-        frameCount = 0;
-        lastFrameTime = now;
-        fpsDiv.textContent = fps;
-    }
-    
-    // Clear previous overlays
-    detectionOverlay.innerHTML = '';
-    
-    if (detections.detections.length > 0) {
-        // Update object count
-        objectCount.innerHTML = `Objects detected: <span class="text-white font-bold">${detections.detections.length}</span>`;
+        // Barriers and walls
+        'chair': { priority: 'medium', displayName: 'Chair', color: '#3b82f6', showLabel: false },
+        'couch': { priority: 'medium', displayName: 'Couch', color: '#3b82f6', showLabel: false },
+        'dining table': { priority: 'medium', displayName: 'Table', color: '#3b82f6', showLabel: false },
+        'bench': { priority: 'medium', displayName: 'Bench', color: '#3b82f6', showLabel: false },
         
-        // Draw detection boxes
-        detections.detections.forEach(detection => {
-            drawDetectionBox(detection);
-        });
+        // Potential obstacles
+        'potted plant': { priority: 'low', displayName: 'Plant', color: '#10b981', showLabel: false },
+        'backpack': { priority: 'low', displayName: 'Bag', color: '#10b981', showLabel: false },
+        'handbag': { priority: 'low', displayName: 'Bag', color: '#10b981', showLabel: false },
+        'suitcase': { priority: 'low', displayName: 'Luggage', color: '#10b981', showLabel: false },
         
-        // Analyze for navigation
-        const guidance = navigationSystem.analyzeObstacles(detections.detections);
-        updateNavigationUI(guidance);
+        // Doors and passages
+        'door': { priority: 'info', displayName: 'Door', color: '#8b5cf6', showLabel: true },
+        'window': { priority: 'info', displayName: 'Window', color: '#8b5cf6', showLabel: false },
         
-        // Trigger alerts if needed
-        if (guidance.audioAlert && now - lastAlertTime > 3000) {
-            triggerAlert(guidance.text, guidance.urgency);
-            lastAlertTime = now;
-        }
-    } else {
-        objectCount.innerHTML = 'Objects detected: <span class="text-white font-bold">0</span>';
-        updateNavigationUI({
-            text: "Path is clear. Proceed with confidence.",
-            urgency: "SAFE",
-            directions: { center: true, left: false, right: false },
-            audioAlert: false
-        });
-    }
-}
-
-// 4. Draw detection boxes
-function drawDetectionBox(detection) {
-    const box = detection.boundingBox;
-    const videoWidth = video.videoWidth || 640;
-    const videoHeight = video.videoHeight || 480;
-    const containerWidth = 320; // Video display width
-    const containerHeight = 320; // Video display height
-    
-    // Scale coordinates to display size
-    const scaleX = containerWidth / videoWidth;
-    const scaleY = containerHeight / videoHeight;
-    
-    const div = document.createElement('div');
-    div.className = 'detection-overlay';
-    div.style.left = `${box.originX * scaleX}px`;
-    div.style.top = `${box.originY * scaleY}px`;
-    div.style.width = `${box.width * scaleX}px`;
-    div.style.height = `${box.height * scaleY}px`;
-    
-    // Color code by distance
-    const distance = navigationSystem.estimateDistance(box);
-    if (distance < 1) {
-        div.style.borderColor = '#ef4444';
-        div.style.backgroundColor = 'rgba(239, 68, 68, 0.2)';
-    } else if (distance < 3) {
-        div.style.borderColor = '#eab308';
-        div.style.backgroundColor = 'rgba(234, 179, 8, 0.1)';
-    } else {
-        div.style.borderColor = '#22c55e';
-        div.style.backgroundColor = 'rgba(34, 197, 94, 0.05)';
-    }
-    
-    detectionOverlay.appendChild(div);
-}
-
-// 5. Update navigation UI
-function updateNavigationUI(guidance) {
-    guidancePanel.classList.remove('hidden');
-    guidanceText.textContent = guidance.text;
-    
-    // Update urgency level
-    urgencyLevel.textContent = guidance.urgency;
-    urgencyLevel.className = `px-3 py-1 rounded-full text-xs font-bold ${
-        guidance.urgency === 'DANGER' ? 'bg-red-500/20 text-red-400' :
-        guidance.urgency === 'CAUTION' ? 'bg-yellow-500/20 text-yellow-400' :
-        'bg-green-500/20 text-green-400'
-    }`;
-    
-    // Update directional indicators
-    const directions = {
-        up: document.getElementById('upDirection'),
-        left: document.getElementById('leftDirection'),
-        center: document.getElementById('centerDirection'),
-        right: document.getElementById('rightDirection')
+        // Traffic elements
+        'traffic light': { priority: 'high', displayName: 'Traffic', color: '#ef4444', showLabel: true },
+        'stop sign': { priority: 'high', displayName: 'Stop Sign', color: '#ef4444', showLabel: true },
+        
+        // Default
+        'default': { priority: 'low', displayName: className, color: '#22c55e', showLabel: false }
     };
     
-    // Reset all directions
-    Object.values(directions).forEach(dir => {
-        dir.className = 'bg-gray-800 rounded-lg p-3 opacity-50';
+    const classification = navigationClasses[className] || navigationClasses['default'];
+    
+    // Adjust priority based on size and confidence
+    const isCritical = classification.priority === 'critical' || 
+                      (relativeSize > 0.3 && classification.priority === 'high') ||
+                      (relativeSize > 0.4 && classification.priority === 'medium');
+    
+    // Adjust color based on proximity
+    let color = classification.color;
+    if (relativeSize > 0.4) {
+        color = '#dc2626'; // Red for very close
+    } else if (relativeSize > 0.2) {
+        color = '#f59e0b'; // Orange for close
+    }
+    
+    return {
+        ...classification,
+        isCritical,
+        color,
+        relativeSize,
+        confidence
+    };
+}
+
+function processNavigation(predictions) {
+    const analysis = analyzeSpatialEnvironment(predictions);
+    
+    if (analysis.isPathClear) {
+        updateUI("Clear path ahead. Continue straight.", "SAFE");
+        provideDirectionalGuidance("straight", analysis);
+    } else {
+        handleObstacles(analysis);
+    }
+    
+    updatePathVisualization(analysis);
+}
+
+function updateUI(text, urgency) {
+    guidanceText.textContent = text;
+    const panel = document.getElementById('guidancePanel');
+    const badge = document.getElementById('urgencyLevel');
+    
+    panel.style.opacity = "1";
+    badge.textContent = urgency;
+    badge.className = `text-xs font-black px-2 py-1 rounded ${
+        urgency === 'DANGER' ? 'bg-red-600 text-white pulse-red' : 
+        urgency === 'CAUTION' ? 'bg-yellow-500 text-black' : 'bg-green-600 text-white'
+    }`;
+}
+
+function analyzeSpatialEnvironment(predictions) {
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+    const centerX = width / 2;
+    const centerY = height / 2;
+    
+    // Create spatial zones
+    const zones = {
+        left: { x: 0, w: width * 0.33, objects: [] },
+        center: { x: width * 0.33, w: width * 0.34, objects: [] },
+        right: { x: width * 0.67, w: width * 0.33, objects: [] },
+        near: { distance: 0, objects: [] },
+        medium: { distance: 0, objects: [] },
+        far: { distance: 0, objects: [] }
+    };
+    
+    // Categorize objects by position and distance
+    predictions.forEach(pred => {
+        const [x, y, w, h] = pred.bbox;
+        const objCenterX = x + w/2;
+        const objCenterY = y + h/2;
+        const size = w / width;
+        const distance = estimateDistance(size, h);
+        
+        // Horizontal positioning
+        if (objCenterX < width * 0.33) zones.left.objects.push({ ...pred, distance, zone: 'left' });
+        else if (objCenterX < width * 0.67) zones.center.objects.push({ ...pred, distance, zone: 'center' });
+        else zones.right.objects.push({ ...pred, distance, zone: 'right' });
+        
+        // Distance categorization
+        if (distance < 2) zones.near.objects.push({ ...pred, distance });
+        else if (distance < 5) zones.medium.objects.push({ ...pred, distance });
+        else zones.far.objects.push({ ...pred, distance });
     });
     
-    // Highlight safe directions
-    if (guidance.directions.center) {
-        directions.center.className = 'bg-green-600 rounded-lg p-3';
+    // Analyze path clearance
+    const pathAnalysis = analyzePathClearance(zones, width, height);
+    
+    return {
+        zones,
+        isPathClear: pathAnalysis.isClear,
+        recommendedDirection: pathAnalysis.direction,
+        obstacles: zones.near.objects.concat(zones.medium.objects),
+        criticalObstacles: zones.near.objects.filter(obj => obj.distance < 1.5),
+        pathWidth: pathAnalysis.width,
+        confidence: calculateNavigationConfidence(zones)
+    };
+}
+
+function estimateDistance(relativeWidth, relativeHeight) {
+    // Simple distance estimation based on object size
+    const avgSize = (relativeWidth + relativeHeight) / 2;
+    if (avgSize > 0.4) return 0.5; // Very close
+    if (avgSize > 0.2) return 1.5; // Close
+    if (avgSize > 0.1) return 3;   // Medium
+    if (avgSize > 0.05) return 5;  // Far
+    return 8; // Very far
+}
+
+function analyzePathClearance(zones, videoWidth, videoHeight) {
+    const centerZone = zones.center;
+    const leftZone = zones.left;
+    const rightZone = zones.right;
+    
+    // Check if center path is blocked
+    const centerBlocked = centerZone.objects.some(obj => obj.distance < 2);
+    
+    if (!centerBlocked) {
+        return { isClear: true, direction: 'straight', width: 'wide' };
     }
-    if (guidance.directions.left) {
-        directions.left.className = 'bg-blue-600 rounded-lg p-3';
+    
+    // Check alternative paths
+    const leftClear = leftZone.objects.filter(obj => obj.distance < 2).length === 0;
+    const rightClear = rightZone.objects.filter(obj => obj.distance < 2).length === 0;
+    
+    if (leftClear && !rightClear) {
+        return { isClear: false, direction: 'left', width: 'narrow' };
+    } else if (rightClear && !leftClear) {
+        return { isClear: false, direction: 'right', width: 'narrow' };
+    } else if (leftClear && rightClear) {
+        // Choose the side with fewer obstacles
+        const leftObstacles = leftZone.objects.length;
+        const rightObstacles = rightZone.objects.length;
+        return { 
+            isClear: false, 
+            direction: leftObstacles < rightObstacles ? 'left' : 'right', 
+            width: 'medium' 
+        };
     }
-    if (guidance.directions.right) {
-        directions.right.className = 'bg-blue-600 rounded-lg p-3';
+    
+    return { isClear: false, direction: 'stop', width: 'blocked' };
+}
+
+function calculateNavigationConfidence(zones) {
+    const totalObjects = zones.left.objects.length + zones.center.objects.length + zones.right.objects.length;
+    const nearObjects = zones.near.objects.length;
+    
+    if (nearObjects > 2) return 'low';
+    if (totalObjects > 5) return 'medium';
+    return 'high';
+}
+
+function handleObstacles(analysis) {
+    const critical = analysis.criticalObstacles;
+    
+    if (critical.length > 0) {
+        const closest = critical[0];
+        const direction = getDirection(closest);
+        triggerFeedback(`STOP! ${closest.class} ${direction}`, "DANGER");
+    } else if (analysis.obstacles.length > 0) {
+        const guidance = getNavigationGuidance(analysis);
+        updateUI(guidance.text, "CAUTION");
+        provideDirectionalGuidance(guidance.direction, analysis);
     }
 }
 
-// 6. Multi-modal alerts
-function triggerAlert(message, urgency) {
-    // Vibration patterns
-    if ('vibrate' in navigator) {
-        if (urgency === 'DANGER') {
-            navigator.vibrate([300, 100, 300, 100, 300]);
-        } else if (urgency === 'CAUTION') {
-            navigator.vibrate([200, 100, 200]);
-        }
-    }
+function getDirection(object) {
+    const [x, y, w, h] = object.bbox;
+    const objCenterX = x + w/2;
+    const videoWidth = video.videoWidth;
+    const relativeX = objCenterX / videoWidth;
     
-    // Voice feedback
-    const utterance = new SpeechSynthesisUtterance(message);
-    utterance.rate = urgency === 'DANGER' ? 1.4 : 1.2;
-    utterance.pitch = urgency === 'DANGER' ? 1.3 : 1.1;
-    utterance.volume = 0.9;
-    synth.speak(utterance);
-    
-    // Visual indicator
-    audioIndicator.classList.remove('hidden');
-    audioIndicator.className = `fixed bottom-4 right-4 border rounded-full p-3 ${
-        urgency === 'DANGER' ? 'bg-red-500/20 border-red-500' :
-        urgency === 'CAUTION' ? 'bg-yellow-500/20 border-yellow-500' :
-        'bg-green-500/20 border-green-500'
-    }`;
-    
-    setTimeout(() => {
-        audioIndicator.classList.add('hidden');
-    }, 2000);
+    if (relativeX < 0.33) return 'to your left';
+    if (relativeX > 0.67) return 'to your right';
+    return 'ahead';
 }
 
-// 7. Start/Stop functionality
-async function startDetection() {
+function getNavigationGuidance(analysis) {
+    const direction = analysis.recommendedDirection;
+    const obstacles = analysis.obstacles;
+    
+    switch(direction) {
+        case 'left':
+            return { 
+                text: 'Obstacle ahead. Turn left.', 
+                direction: 'left',
+                reason: obstacles[0]?.class || 'object'
+            };
+        case 'right':
+            return { 
+                text: 'Obstacle ahead. Turn right.', 
+                direction: 'right',
+                reason: obstacles[0]?.class || 'object'
+            };
+        case 'stop':
+            return { 
+                text: 'Path blocked. Find alternative route.', 
+                direction: 'stop',
+                reason: 'multiple obstacles'
+            };
+        default:
+            return { text: 'Proceed with caution.', direction: 'straight' };
+    }
+}
+
+function provideDirectionalGuidance(direction, analysis) {
+    const now = Date.now();
+    if (now - lastDirectionTime < 2000) return; // Throttle directions
+    
+    let message = '';
+    let hapticPattern = [];
+    
+    switch(direction) {
+        case 'left':
+            message = 'Turn left';
+            hapticPattern = [100, 50, 100];
+            break;
+        case 'right':
+            message = 'Turn right';
+            hapticPattern = [50, 100, 50];
+            break;
+        case 'straight':
+            message = 'Go straight';
+            hapticPattern = [200];
+            break;
+        case 'stop':
+            message = 'Stop';
+            hapticPattern = [200, 100, 200, 100, 200];
+            break;
+    }
+    
+    if (message && navigator.vibrate) {
+        navigator.vibrate(hapticPattern);
+    }
+    
+    if (message && now - lastDirectionTime > 3000) {
+        const speech = new SpeechSynthesisUtterance(message);
+        speech.rate = 1.1;
+        window.speechSynthesis.speak(speech);
+        lastDirectionTime = now;
+    }
+    
+    updateDirectionIndicator(direction);
+}
+
+function updateDirectionIndicator(direction) {
+    if (!directionIndicator) return;
+    
+    directionIndicator.className = 'absolute top-4 left-4 bg-black/60 px-3 py-2 rounded-full text-sm font-bold ';
+    
+    switch(direction) {
+        case 'left':
+            directionIndicator.innerHTML = '← LEFT';
+            directionIndicator.classList.add('text-blue-400');
+            break;
+        case 'right':
+            directionIndicator.innerHTML = 'RIGHT →';
+            directionIndicator.classList.add('text-blue-400');
+            break;
+        case 'straight':
+            directionIndicator.innerHTML = '↑ STRAIGHT';
+            directionIndicator.classList.add('text-green-400');
+            break;
+        case 'stop':
+            directionIndicator.innerHTML = '✕ STOP';
+            directionIndicator.classList.add('text-red-400', 'pulse-red');
+            break;
+    }
+}
+
+function triggerFeedback(message, urgency) {
+    updateUI(message, urgency);
+    const now = Date.now();
+    
+    if (now - lastAlertTime > 3000) { // Throttle speech to every 3 seconds
+        // Haptics
+        if (navigator.vibrate) navigator.vibrate(urgency === "DANGER" ? [200, 100, 200] : 100);
+        
+        // Voice
+        const speech = new SpeechSynthesisUtterance(message);
+        speech.rate = 1.1;
+        speech.pitch = urgency === "DANGER" ? 1.2 : 1.0;
+        window.speechSynthesis.speak(speech);
+        lastAlertTime = now;
+    }
+}
+
+function updatePathVisualization(analysis) {
+    if (!pathClearance) return;
+    
+    const clearance = analysis.pathWidth;
+    let html = '';
+    
+    // Show path zones with obstacle counts
+    html += `<div class="flex justify-between text-xs mb-1">`;
+    html += `<span class="${analysis.zones.left.objects.length > 0 ? 'text-red-400' : 'text-green-400'}">L(${analysis.zones.left.objects.length})</span>`;
+    html += `<span class="${analysis.zones.center.objects.length > 0 ? 'text-red-400' : 'text-green-400'}">C(${analysis.zones.center.objects.length})</span>`;
+    html += `<span class="${analysis.zones.right.objects.length > 0 ? 'text-red-400' : 'text-green-400'}">R(${analysis.zones.right.objects.length})</span>`;
+    html += `</div>`;
+    
+    // Show confidence level
+    const confidenceColor = analysis.confidence === 'high' ? 'text-green-400' : 
+                           analysis.confidence === 'medium' ? 'text-yellow-400' : 'text-red-400';
+    html += `<div class="text-xs ${confidenceColor}">${analysis.confidence.toUpperCase()}</div>`;
+    
+    pathClearance.innerHTML = html;
+}
+
+startBtn.addEventListener('click', async () => {
     if (!isRunning) {
-        // Initialize systems
-        const aiReady = await setupAI();
-        const cameraReady = await setupCamera();
-        
-        if (aiReady && cameraReady) {
-            isRunning = true;
-            startBtn.innerHTML = '<i class="fas fa-stop mr-3"></i><span>STOP RUN</span>';
-            startBtn.className = 'relative group';
-            startBtn.querySelector('div').className = 'absolute inset-0 bg-gradient-to-r from-gray-600 to-gray-500 rounded-full blur-lg opacity-75 group-hover:opacity-100 transition-all pulse-ring';
-            startBtn.querySelector('div:last-child').className = 'relative bg-gray-600 hover:bg-gray-500 w-56 h-56 rounded-full text-2xl font-bold transition-all transform hover:scale-105 flex items-center justify-center';
-            
-            statusDiv.textContent = "Detection active";
-            statusDiv.className = "text-yellow-500 font-mono animate-pulse";
-            guidancePanel.classList.remove('hidden');
-        }
+        await startCamera();
+        isRunning = true;
+        startBtn.classList.add('running');
+        detectionLoop();
     } else {
-        // Stop detection
-        isRunning = false;
-        if (camera) {
-            camera.stop();
-        }
-        
-        startBtn.innerHTML = '<i class="fas fa-play mr-3"></i><span>START RUN</span>';
-        startBtn.className = 'relative group';
-        startBtn.querySelector('div').className = 'absolute inset-0 bg-gradient-to-r from-red-600 to-red-500 rounded-full blur-lg opacity-75 group-hover:opacity-100 transition-all pulse-ring';
-        startBtn.querySelector('div:last-child').className = 'relative bg-red-600 hover:bg-red-500 w-56 h-56 rounded-full text-2xl font-bold transition-all transform hover:scale-105 flex items-center justify-center';
-        
-        statusDiv.textContent = "System Ready...";
-        statusDiv.className = "text-green-500 font-mono";
-        guidancePanel.classList.add('hidden');
-        detectionOverlay.innerHTML = '';
-        fpsDiv.textContent = '0';
+        location.reload(); // Simple stop
     }
-}
-
-// 8. Event listeners
-startBtn.addEventListener('click', startDetection);
-
-// Initialize on page load
-document.addEventListener('DOMContentLoaded', () => {
-    statusDiv.textContent = "System Ready...";
-    console.log("VisionStride AI Navigation Assistant initialized");
 });
+
+init();
