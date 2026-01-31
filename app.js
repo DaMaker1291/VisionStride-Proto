@@ -19,23 +19,69 @@ async function init() {
     try {
         statusDiv.textContent = "Loading AI Model...";
         
-        // Mobile performance optimizations
+        // Mobile device detection
         const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
         
         if (isMobile) {
-            // Use lighter model for mobile devices
-            model = await cocoSsd.load({
-                base: 'mobilenet_v2',
-                modelUrl: 'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/model.json'
-            });
+            // Try multiple model configurations for mobile
+            try {
+                // First try: MobileNet V2 with CDN
+                model = await cocoSsd.load({
+                    base: 'mobilenet_v2'
+                });
+                statusDiv.textContent = "System Ready";
+                return;
+            } catch (error1) {
+                console.log('MobileNet V2 failed, trying with custom URL:', error1);
+                
+                try {
+                    // Second try: Custom model URL
+                    model = await cocoSsd.load({
+                        base: 'mobilenet_v2',
+                        modelUrl: 'https://tfhub.dev/tensorflow/tfjs-model/coco-ssd-mobilenet-v2/1/default/1',
+                        weightsUrl: 'https://tfhub.dev/tensorflow/tfjs-model/coco-ssd-mobilenet-v2/1/default/1'
+                    });
+                    statusDiv.textContent = "System Ready";
+                    return;
+                } catch (error2) {
+                    console.log('Custom URL failed, trying lighter model:', error2);
+                    
+                    try {
+                        // Third try: Default model (lighter version)
+                        model = await cocoSsd.load();
+                        statusDiv.textContent = "System Ready";
+                        return;
+                    } catch (error3) {
+                        console.log('Default model failed, trying minimal config:', error3);
+                        
+                        try {
+                            // Fourth try: Minimal configuration
+                            model = await cocoSsd.load({
+                                base: 'mobilenet_v1'
+                            });
+                            statusDiv.textContent = "System Ready";
+                            return;
+                        } catch (error4) {
+                            throw new Error('All model loading attempts failed. Please check your internet connection.');
+                        }
+                    }
+                }
+            }
         } else {
+            // Desktop loading
             model = await cocoSsd.load();
+            statusDiv.textContent = "System Ready";
         }
-        
-        statusDiv.textContent = "System Ready";
     } catch (error) {
         console.error('Model loading failed:', error);
-        statusDiv.textContent = "Model loading failed. Please refresh.";
+        statusDiv.textContent = "Model loading failed. Check internet and refresh.";
+        
+        // Show user-friendly error message
+        setTimeout(() => {
+            if (confirm('Model loading failed. This may be due to poor internet connection. Would you like to try again?')) {
+                location.reload();
+            }
+        }, 2000);
     }
 }
 
