@@ -16,28 +16,88 @@ const pathClearance = document.getElementById('pathClearance');
 
 // Load the AI Model
 async function init() {
-    statusDiv.textContent = "Loading AI Model...";
-    model = await cocoSsd.load();
-    statusDiv.textContent = "System Ready";
+    try {
+        statusDiv.textContent = "Loading AI Model...";
+        
+        // Mobile performance optimizations
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+        
+        if (isMobile) {
+            // Use lighter model for mobile devices
+            model = await cocoSsd.load({
+                base: 'mobilenet_v2',
+                modelUrl: 'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/model.json'
+            });
+        } else {
+            model = await cocoSsd.load();
+        }
+        
+        statusDiv.textContent = "System Ready";
+    } catch (error) {
+        console.error('Model loading failed:', error);
+        statusDiv.textContent = "Model loading failed. Please refresh.";
+    }
 }
 
 async function startCamera() {
-    const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment', width: 640, height: 480 },
-        audio: false
-    });
-    video.srcObject = stream;
-    return new Promise((resolve) => video.onloadedmetadata = resolve);
+    try {
+        // Mobile device camera configuration
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+        
+        let constraints = {
+            video: {
+                width: { ideal: 640, max: 1280 },
+                height: { ideal: 480, max: 720 },
+                facingMode: isMobile ? 'environment' : 'user'
+            },
+            audio: false
+        };
+        
+        // Try to get camera with environment (back) camera first for mobile
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia(constraints);
+            video.srcObject = stream;
+            return new Promise((resolve) => video.onloadedmetadata = resolve);
+        } catch (envError) {
+            console.log('Environment camera failed, trying user camera:', envError);
+            
+            // Fallback to user (front) camera
+            constraints.video.facingMode = 'user';
+            const stream = await navigator.mediaDevices.getUserMedia(constraints);
+            video.srcObject = stream;
+            return new Promise((resolve) => video.onloadedmetadata = resolve);
+        }
+    } catch (error) {
+        console.error('Camera access failed:', error);
+        
+        // Final fallback with basic constraints
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: true,
+                audio: false
+            });
+            video.srcObject = stream;
+            return new Promise((resolve) => video.onloadedmetadata = resolve);
+        } catch (fallbackError) {
+            throw new Error('Camera access denied. Please allow camera permissions to use this app.');
+        }
+    }
 }
 
 async function detectionLoop() {
     if (!isRunning) return;
 
-    const predictions = await model.detect(video);
-    renderDetections(predictions);
-    processNavigation(predictions);
+    try {
+        const predictions = await model.detect(video);
+        renderDetections(predictions);
+        processNavigation(predictions);
+    } catch (error) {
+        console.error('Detection error:', error);
+        // Continue running even if detection fails
+    }
     
-    requestAnimationFrame(detectionLoop);
+    // Use setTimeout for better mobile performance instead of requestAnimationFrame
+    setTimeout(() => detectionLoop(), 100); // 10 FPS for mobile
 }
 
 function renderDetections(predictions) {
@@ -434,15 +494,27 @@ function provideDirectionalGuidance(direction, analysis) {
     }
     
     if (message && navigator.vibrate) {
-        navigator.vibrate(hapticPattern);
+        try {
+            navigator.vibrate(hapticPattern);
+        } catch (vibrateError) {
+            console.log('Vibration failed:', vibrateError);
+        }
     }
     
     if (message && shouldSpeak && now - lastDirectionTime > 3000) {
-        const speech = new SpeechSynthesisUtterance(message);
-        speech.rate = 1.1;
-        window.speechSynthesis.speak(speech);
-        lastSpokenMessage = message;
-        lastDirectionTime = now;
+        try {
+            // Cancel any previous speech to avoid overlap
+            window.speechSynthesis.cancel();
+            
+            const speech = new SpeechSynthesisUtterance(message);
+            speech.rate = 1.1;
+            speech.volume = 0.8; // Lower volume for mobile
+            window.speechSynthesis.speak(speech);
+            lastSpokenMessage = message;
+            lastDirectionTime = now;
+        } catch (speechError) {
+            console.log('Speech failed:', speechError);
+        }
     }
     
     updateDirectionIndicator(direction);
@@ -478,14 +550,30 @@ function triggerFeedback(message, urgency) {
     const now = Date.now();
     
     if (now - lastAlertTime > 3000) { // Throttle speech to every 3 seconds
-        // Haptics
-        if (navigator.vibrate) navigator.vibrate(urgency === "DANGER" ? [200, 100, 200] : 100);
+        // Haptics - mobile compatible
+        if (navigator.vibrate) {
+            const pattern = urgency === "DANGER" ? [200, 100, 200] : [100];
+            try {
+                navigator.vibrate(pattern);
+            } catch (vibrateError) {
+                console.log('Vibration not supported:', vibrateError);
+            }
+        }
         
-        // Voice
-        const speech = new SpeechSynthesisUtterance(message);
-        speech.rate = 1.1;
-        speech.pitch = urgency === "DANGER" ? 1.2 : 1.0;
-        window.speechSynthesis.speak(speech);
+        // Voice - mobile compatible
+        try {
+            const speech = new SpeechSynthesisUtterance(message);
+            speech.rate = 1.1;
+            speech.pitch = urgency === "DANGER" ? 1.2 : 1.0;
+            speech.volume = 0.8; // Lower volume for mobile
+            
+            // Cancel any previous speech to avoid overlap
+            window.speechSynthesis.cancel();
+            window.speechSynthesis.speak(speech);
+        } catch (speechError) {
+            console.log('Speech synthesis not supported:', speechError);
+        }
+        
         lastAlertTime = now;
     }
 }
@@ -513,11 +601,23 @@ function updatePathVisualization(analysis) {
 
 startBtn.addEventListener('click', async () => {
     if (!isRunning) {
-        await startCamera();
-        isRunning = true;
-        startBtn.classList.add('running');
-        detectionLoop();
+        try {
+            statusDiv.textContent = "Starting camera...";
+            await startCamera();
+            isRunning = true;
+            startBtn.classList.add('running');
+            detectionLoop();
+        } catch (error) {
+            console.error('Camera start failed:', error);
+            statusDiv.textContent = "Camera failed. Check permissions.";
+            alert('Camera access required. Please allow camera permissions and try again.');
+        }
     } else {
+        // Stop camera stream
+        if (video.srcObject) {
+            video.srcObject.getTracks().forEach(track => track.stop());
+            video.srcObject = null;
+        }
         location.reload(); // Simple stop
     }
 });

@@ -2,7 +2,10 @@
 <html lang="en" class="dark">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="mobile-web-app-capable" content="yes">
     <title>VisionStride AI</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
@@ -12,27 +15,63 @@
         .detection-box { border: 2px solid; position: absolute; pointer-events: none; z-index: 10; }
         .pulse-red { animation: pulse 1.5s infinite; }
         @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.7); } 70% { box-shadow: 0 0 0 20px rgba(220, 38, 38, 0); } 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); } }
+        
+        /* Mobile optimizations */
+        body { 
+            -webkit-touch-callout: none; 
+            -webkit-user-select: none; 
+            user-select: none; 
+            overscroll-behavior: none;
+            touch-action: manipulation;
+        }
+        
+        .mobile-video {
+            transform: scaleX(-1);
+            -webkit-transform: scaleX(-1);
+        }
+        
+        .mobile-button {
+            -webkit-tap-highlight-color: transparent;
+            touch-action: manipulation;
+        }
+        
+        @media (max-width: 640px) {
+            .mobile-container {
+                padding: 1rem;
+            }
+            .mobile-video-container {
+                max-width: 100vw;
+                height: 60vh;
+            }
+            .mobile-button {
+                width: 4rem;
+                height: 4rem;
+            }
+            .mobile-text {
+                font-size: 0.875rem;
+            }
+        }
     </style>
 </head>
-<body class="bg-zinc-950 text-zinc-100 flex flex-col items-center justify-between min-h-screen p-6 overflow-hidden">
-    <header class="text-center">
-        <h1 class="text-3xl font-black tracking-tighter text-white">VISION<span class="text-red-600">STRIDE</span></h1>
-        <div id="status" class="text-xs font-mono text-zinc-500 mt-2 uppercase tracking-widest">Initializing AI...</div>
+<body class="bg-zinc-950 text-zinc-100 flex flex-col items-center justify-between min-h-screen mobile-container overflow-hidden">
+    <header class="text-center px-4 py-2">
+        <h1 class="text-2xl sm:text-3xl font-black tracking-tighter text-white mobile-text">VISION<span class="text-red-600">STRIDE</span></h1>
+        <div id="status" class="text-xs font-mono text-zinc-500 mt-1 uppercase tracking-widest mobile-text">Initializing AI...</div>
     </header>
 
-    <div class="relative w-full max-w-md aspect-square bg-zinc-900 rounded-3xl border-2 border-zinc-800 overflow-hidden shadow-2xl">
-        <video id="webcam" autoplay playsinline class="w-full h-full object-cover grayscale opacity-40"></video>
+    <div class="relative w-full max-w-md mobile-video-container aspect-square bg-zinc-900 rounded-3xl border-2 border-zinc-800 overflow-hidden shadow-2xl">
+        <video id="webcam" autoplay playsinline muted class="w-full h-full object-cover grayscale opacity-40 mobile-video"></video>
         <div id="detectionOverlay" class="absolute inset-0"></div>
         
-        <div id="directionIndicator" class="absolute top-4 left-4 bg-black/60 px-3 py-2 rounded-full text-sm font-bold text-zinc-400">
+        <div id="directionIndicator" class="absolute top-4 left-4 bg-black/60 px-3 py-2 rounded-full text-sm font-bold text-zinc-400 mobile-text">
             READY
         </div>
         
-        <div class="absolute top-4 right-4 bg-black/60 px-3 py-1 rounded-full text-[10px] font-bold">
+        <div class="absolute top-4 right-4 bg-black/60 px-3 py-1 rounded-full text-[10px] font-bold mobile-text">
             FPS: <span id="fps">0</span>
         </div>
         
-        <div id="pathClearance" class="absolute bottom-4 left-4 bg-black/60 px-3 py-2 rounded-full text-xs font-mono">
+        <div id="pathClearance" class="absolute bottom-4 left-4 bg-black/60 px-3 py-2 rounded-full text-xs font-mono mobile-text">
             <div class="flex justify-between text-xs mb-1">
                 <span class="text-zinc-500">L</span>
                 <span class="text-zinc-500">C</span>
@@ -41,19 +80,19 @@
         </div>
     </div>
 
-    <div id="guidancePanel" class="w-full max-w-md bg-zinc-900 p-6 rounded-3xl border border-zinc-800 mb-4 transition-all opacity-20">
+    <div id="guidancePanel" class="w-full max-w-md bg-zinc-900 p-4 sm:p-6 rounded-3xl border border-zinc-800 mb-4 transition-all opacity-20">
         <div class="flex justify-between items-start mb-2">
-            <span id="urgencyLevel" class="text-xs font-black px-2 py-1 rounded bg-zinc-800">SAFE</span>
-            <span id="objectCount" class="text-xs text-zinc-500">0 Objects detected</span>
+            <span id="urgencyLevel" class="text-xs font-black px-2 py-1 rounded bg-zinc-800 mobile-text">SAFE</span>
+            <span id="objectCount" class="text-xs text-zinc-500 mobile-text">0 Objects detected</span>
         </div>
-        <p id="guidanceText" class="text-lg font-medium leading-tight">System standing by.</p>
+        <p id="guidanceText" class="text-base sm:text-lg font-medium leading-tight mobile-text">System standing by.</p>
     </div>
 
-    <button id="startBtn" class="group relative flex items-center justify-center w-24 h-24 bg-red-600 rounded-full hover:bg-red-500 transition-all active:scale-95 shadow-lg">
-        <i class="fas fa-play text-2xl text-white group-[.running]:hidden"></i>
-        <i class="fas fa-stop text-2xl text-white hidden group-[.running]:block"></i>
+    <button id="startBtn" class="group relative flex items-center justify-center w-20 h-20 sm:w-24 sm:h-24 bg-red-600 rounded-full hover:bg-red-500 transition-all active:scale-95 shadow-lg mobile-button">
+        <i class="fas fa-play text-xl sm:text-2xl text-white group-[.running]:hidden"></i>
+        <i class="fas fa-stop text-xl sm:text-2xl text-white hidden group-[.running]:block"></i>
     </button>
 
-    <script src="app.js?v=12347"></script>
+    <script src="app.js?v=12348"></script>
 </body>
 </html>
